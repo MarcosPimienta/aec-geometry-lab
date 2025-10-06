@@ -194,6 +194,15 @@ export function buildWireframeIndices(tri: Uint32Array | Uint16Array): Uint32Arr
   return new Uint32Array(lines);
 }
 
+// Approximate per-vertex "valence" by counting how many times each vertex
+// appears across all triangles (good enough for a heatmap; the exact topological
+// valence via half-edge is nicer, but this is trivial and fast).
+export function approxValences(tri: Uint32Array | Uint16Array, vertCount: number): Uint16Array {
+  const v = new Uint16Array(vertCount);
+  for (let i=0;i<tri.length;i+=3){ v[tri[i]]++; v[tri[i+1]]++; v[tri[i+2]]++; }
+  return v;
+}
+
 /**
  * Map valence to a color (simple blue→green→red ramp).
  * Returns a Float32Array of length 3*N (RGB per vertex).
