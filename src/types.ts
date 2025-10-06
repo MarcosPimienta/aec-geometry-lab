@@ -6,6 +6,10 @@ export interface Mesh {
   normals: Float32Array;   // 3 * n
   uvs?: Float32Array;      // 2 * n
   indices: Uint32Array;    // 3 * m
+  // optional helpers
+  bbox?: { min: Vec3; max: Vec3 };
+  center?: Vec3;
+  scale?: number; // uniform scale applied after normalization (if any)
 }
 
 export interface PickInfo {

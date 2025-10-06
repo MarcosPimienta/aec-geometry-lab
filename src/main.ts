@@ -1,124 +1,126 @@
 import { getGL, createProgram } from './webgl/gl';
 import { VS, FS } from './webgl/shaders';
 import { perspective, lookAt, identity, rotateY } from './webgl/camera';
+import { uploadMesh, bindMesh, setColors, setLines } from './webgl/mesh';
+import type { GLMesh } from './webgl/mesh';
+import { loadOBJ } from './loaders/obj';
+import type { Mesh } from './types';
+import { buildHalfEdge, computeValences, buildWireframeIndices, buildValenceColors } from './geom/halfedge';
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
 const gl = getGL(canvas);
 
-// ---------- Resize & viewport ----------
-function resize() {
-  canvas.width  = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
-  gl.viewport(0, 0, canvas.width, canvas.height);
-}
-window.addEventListener('resize', resize);
-resize();
+function resize(){ canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; gl.viewport(0,0,canvas.width,canvas.height); }
+window.addEventListener('resize', resize); resize();
 
-// ---------- Program & locations ----------
 const program = createProgram(gl, VS, FS);
 gl.useProgram(program);
 
 const loc = {
-  aPosition: gl.getAttribLocation(program, 'aPosition'),
-  aNormal:   gl.getAttribLocation(program, 'aNormal'),
-  uProj:     gl.getUniformLocation(program, 'uProj'),
-  uView:     gl.getUniformLocation(program, 'uView'),
-  uModel:    gl.getUniformLocation(program, 'uModel'),
-  uMorph:    gl.getUniformLocation(program, 'uMorph'),
+  uProj: gl.getUniformLocation(program, 'uProj'),
+  uView: gl.getUniformLocation(program, 'uView'),
+  uModel: gl.getUniformLocation(program, 'uModel'),
+  uMorph: gl.getUniformLocation(program, 'uMorph'),
+  uUseVertexColor: gl.getUniformLocation(program, 'uUseVertexColor'),
 } as const;
 
-// ---------- A simple indexed mesh: a unit cube ----------
-const P = new Float32Array([
-  // 8 vertices of a cube
-  -1,-1,-1,   1,-1,-1,   1, 1,-1,  -1, 1,-1,   // back
-  -1,-1, 1,   1,-1, 1,   1, 1, 1,  -1, 1, 1    // front
-]);
-const N = new Float32Array([
-  // crude per-vertex normals (not perfect but fine for lambert demo)
-  -1,-1,-1,   1,-1,-1,   1, 1,-1,  -1, 1,-1,
-  -1,-1, 1,   1,-1, 1,   1, 1, 1,  -1, 1, 1
-]);
-const I = new Uint16Array([
-  // 12 triangles (two per face)
-  0,1,2,  0,2,3,  // back
-  4,6,5,  4,7,6,  // front
-  0,4,5,  0,5,1,  // bottom
-  3,2,6,  3,6,7,  // top
-  0,3,7,  0,7,4,  // left
-  1,5,6,  1,6,2   // right
-]);
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.12,0.13,0.17,1);
 
-// Buffers
-const vboPos = gl.createBuffer()!;
-gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
-gl.bufferData(gl.ARRAY_BUFFER, P, gl.STATIC_DRAW);
+// ---- state ----
+let morph = 0;
+let t = 0;
+const model = identity();
 
-const vboNor = gl.createBuffer()!;
-gl.bindBuffer(gl.ARRAY_BUFFER, vboNor);
-gl.bufferData(gl.ARRAY_BUFFER, N, gl.STATIC_DRAW);
+let gm: GLMesh | null = null;     // GPU mesh
+let triMode = true;               // true => draw TRIANGLES, false => draw LINES
+let colorMode = false;            // true => use per-vertex colors (valence)
 
-const ebo = gl.createBuffer()!;
-gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, I, gl.STATIC_DRAW);
+// UI hooks already exist in your sidebar HTML:
+const morphIn  = document.getElementById('morph') as HTMLInputElement | null;
+const morphVal = document.getElementById('morphVal') as HTMLElement | null;
+const wireCk   = document.getElementById('wire') as HTMLInputElement | null;
+const valCk    = document.getElementById('valence') as HTMLInputElement | null;
 
-// Attribute setup
-gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
-gl.enableVertexAttribArray(loc.aPosition);
-gl.vertexAttribPointer(loc.aPosition, 3, gl.FLOAT, false, 0, 0);
-
-gl.bindBuffer(gl.ARRAY_BUFFER, vboNor);
-gl.enableVertexAttribArray(loc.aNormal);
-gl.vertexAttribPointer(loc.aNormal, 3, gl.FLOAT, false, 0, 0);
-
-// ---------- Camera & uniforms ----------
-let morph = 0.0;
-const morphInput = document.getElementById('morph') as HTMLInputElement;
-const morphVal   = document.getElementById('morphVal')!;
-morphInput.addEventListener('input', () => {
-  morph = parseFloat(morphInput.value);
-  morphVal.textContent = morph.toFixed(2);
+morphIn?.addEventListener('input', () => {
+  morph = parseFloat(morphIn.value);
+  if (morphVal) morphVal.textContent = morph.toFixed(2);
 });
 
-gl.enable(gl.DEPTH_TEST);
-gl.clearColor(0.12, 0.13, 0.17, 1);
+wireCk?.addEventListener('change', () => {
+  triMode = !wireCk!.checked ? true : false; // checked -> show wireframe (LINES)
+});
 
-// Projection & View (set once per frame)
-function computeProj() {
-  const aspect = canvas.width / canvas.height;
-  return perspective(Math.PI/4, aspect, 0.01, 100);
+valCk?.addEventListener('change', () => {
+  colorMode = !!valCk!.checked;
+});
+
+// Camera fns
+function proj(){ return perspective(Math.PI/4, canvas.width / canvas.height, 0.01, 100); }
+function view(){
+  const r=6.0; return lookAt([Math.cos(t*0.6)*r, 3.5, Math.sin(t*0.6)*r], [0,0,0], [0,1,0]);
 }
 
-function computeView(t:number) {
-  // orbit camera around the origin
-  const radius = 6.0;
-  const eyeX = Math.cos(t*0.6) * radius;
-  const eyeZ = Math.sin(t*0.6) * radius;
-  return lookAt([eyeX, 3.5, eyeZ], [0,0,0], [0,1,0]);
-}
-
-// ---------- Animation loop ----------
-const model = identity();
-let t = 0;
-
-function frame() {
-  t += 0.016; // ~60 FPS step; you could use real deltaTime if you like
-
-  const proj = computeProj();
-  const view = computeView(t);
-
-  // Optional: slowly spin model too
-  rotateY(model, t * 0.5);
+// Draw loop
+function frame(){
+  t += 0.016;
+  rotateY(model, t*0.3);
 
   gl.useProgram(program);
-  gl.uniformMatrix4fv(loc.uProj,  false, proj);
-  gl.uniformMatrix4fv(loc.uView,  false, view);
+  gl.uniformMatrix4fv(loc.uProj, false, proj());
+  gl.uniformMatrix4fv(loc.uView, false, view());
   gl.uniformMatrix4fv(loc.uModel, false, model);
   gl.uniform1f(loc.uMorph, morph);
+  gl.uniform1i(loc.uUseVertexColor, colorMode ? 1 : 0);
 
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-  gl.drawElements(gl.TRIANGLES, I.length, gl.UNSIGNED_SHORT, 0);
+
+  if (gm) {
+    bindMesh(gl, program, gm);
+
+    if (triMode) {
+      // Fill triangles (default)
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gm.ebo);
+      gl.drawElements(gl.TRIANGLES, gm.triCount, gm.indexType, 0);
+    } else {
+      // Wireframe overlay: draw unique edges as GL_LINES
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gm.lbo!);
+      gl.drawElements(gl.LINES, gm.lineCount, gm.indexType, 0);
+    }
+  }
 
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// ---------- OBJ loader ----------
+const objInput = document.getElementById('objFile') as HTMLInputElement | null;
+objInput?.addEventListener('change', async (e:any) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  try {
+    // 1) Load mesh (positions, normals, indices, already normalized)
+    const mesh: Mesh = await loadOBJ(file);
+
+    // 2) Upload to GPU
+    gm = uploadMesh(gl, mesh);
+
+    // 3) Build half-edge from indices + compute valences
+    const he = buildHalfEdge(mesh.indices, mesh.positions.length / 3);
+    const valences = computeValences(he);
+
+    // 4) Build and upload valence colors (RGB per vertex)
+    const colors = buildValenceColors(valences);
+    setColors(gl, gm, colors);        // this enables aColor attribute when colorMode=true
+
+    // 5) Build and upload unique wireframe indices
+    const lines = buildWireframeIndices(mesh.indices);
+    setLines(gl, gm, lines);
+
+    console.info('OBJ loaded. Verts:', mesh.positions.length/3, 'Tris:', mesh.indices.length/3);
+  } catch (err) {
+    console.error(err);
+    alert('OBJ load failed (see console).');
+  }
+});

@@ -18,6 +18,11 @@
         <h3>Shader Uniform</h3>
         <label>Morph <span id="morphVal">0.00</span></label>
         <input type="range" id="morph" min="0" max="1" step="0.01" value="0" />
+        <h3>OBJ</h3>
+        <div class="row"><input type="file" id="objFile" accept=".obj" /></div>
+        <h3>View</h3>
+        <label><input type="checkbox" id="wire" /> Wireframe (lines)</label>
+        <label><input type="checkbox" id="valence" /> Valence heatmap (per-vertex color)</label>
       </aside>
       <canvas id="gl"></canvas>
     </div>
