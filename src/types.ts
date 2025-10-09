@@ -2,14 +2,13 @@ export type Vec3 = [number, number, number];
 export type Vec2 = [number, number];
 
 export interface Mesh {
-  positions: Float32Array; // 3 * n
-  normals: Float32Array;   // 3 * n
-  uvs?: Float32Array;      // 2 * n
-  indices: Uint32Array;    // 3 * m
-  // optional helpers
-  bbox?: { min: Vec3; max: Vec3 };
-  center?: Vec3;
-  scale?: number; // uniform scale applied after normalization (if any)
+  positions: Float32Array;   // 3*N
+  normals:   Float32Array;   // 3*N
+  uvs?:      Float32Array;   // 2*N
+  indices:   Uint32Array | Uint16Array;  // ⬅️ union type here
+  bbox?: { min: [number,number,number]; max: [number,number,number] };
+  center?: [number,number,number];
+  scale?: number;
 }
 
 export interface PickInfo {
