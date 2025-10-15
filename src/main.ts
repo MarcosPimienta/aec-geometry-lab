@@ -1,3 +1,5 @@
+// src/main.ts
+
 // ──────────────────────────────────────────────────────────────
 // Core imports
 // ──────────────────────────────────────────────────────────────
@@ -17,8 +19,9 @@ import {
   buildValenceColors,
 } from './geom/halfedge';
 
-// IFC loader (WASM core)
-import { loadIFC, closeIFC } from './loaders/ifc';
+// IFC loaders
+import { loadIFCviaThree } from './loaders/ifc_three';            // tessellate + merge (geometry)
+import { loadIFC as loadIFCcore, closeIFC } from './loaders/ifc'; // properties-only (no geometry)
 
 // ──────────────────────────────────────────────────────────────
 // Canvas + GL init
@@ -31,15 +34,14 @@ function resize() {
   canvas.height = canvas.clientHeight;
   gl.viewport(0, 0, canvas.width, canvas.height);
 }
-window.addEventListener('resize', () => { resize(); logCanvasSize('resize'); });
-resize();
-
 function logCanvasSize(where: string) {
   console.info(`[canvas] ${where}`, {
     client: [canvas.clientWidth, canvas.clientHeight],
     backing: [canvas.width, canvas.height],
   });
 }
+window.addEventListener('resize', () => { resize(); logCanvasSize('resize'); });
+resize();
 logCanvasSize('init');
 
 const program = createProgram(gl, VS, FS);
@@ -57,7 +59,7 @@ gl.enable(gl.DEPTH_TEST);
 gl.clearColor(0.12, 0.13, 0.17, 1);
 
 // ──────────────────────────────────────────────────────────────
-// App state
+/** App state */
 // ──────────────────────────────────────────────────────────────
 let morph = 0;
 let t = 0;
@@ -68,7 +70,7 @@ let triMode = true;           // TRIANGLES vs LINES
 let colorMode = false;        // per-vertex color heatmap
 
 // ──────────────────────────────────────────────────────────────
-// UI
+/** UI */
 // ──────────────────────────────────────────────────────────────
 const morphIn  = document.getElementById('morph') as HTMLInputElement | null;
 const morphVal = document.getElementById('morphVal') as HTMLElement | null;
@@ -83,7 +85,7 @@ wireCk?.addEventListener('change', () => { triMode = !wireCk!.checked; });
 valCk?.addEventListener('change', () => { colorMode = !!valCk!.checked; });
 
 // ──────────────────────────────────────────────────────────────
-// Camera
+/** Camera */
 // ──────────────────────────────────────────────────────────────
 function proj() {
   return perspective(Math.PI / 4, canvas.width / canvas.height, 0.01, 100);
@@ -94,7 +96,7 @@ function view() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Debug: force a known-good cube (press "D")
+/** Debug: press "D" for a known-good cube */
 // ──────────────────────────────────────────────────────────────
 function debugCube(): Mesh {
   const p = new Float32Array([
@@ -118,12 +120,13 @@ window.addEventListener('keydown', (ev) => {
       gm = uploadMesh(gl, cube);
       setLines(gl, gm, buildWireframeIndices(cube.indices));
       setColors(gl, gm, new Float32Array(cube.positions.length)); // unused unless Valence on
+      console.info('DEBUG cube uploaded:', { tri: (cube.indices.length / 3) | 0 });
     }
   }
 });
 
 // ──────────────────────────────────────────────────────────────
-// Render loop
+/** Render loop */
 // ──────────────────────────────────────────────────────────────
 function frame() {
   t += 0.016;
@@ -162,72 +165,20 @@ function frame() {
 requestAnimationFrame(frame);
 
 // ──────────────────────────────────────────────────────────────
-/** OBJ loader (Milestones 2/3) */
+/** Utilities (visibility + safety) */
 // ──────────────────────────────────────────────────────────────
-const objInput = document.getElementById('objFile') as HTMLInputElement | null;
-objInput?.addEventListener('change', async (e: any) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  try {
-    const mesh: Mesh = await loadOBJ(file); // already normalized in that loader
-    gm = uploadMesh(gl, mesh);
-
-    const he = buildHalfEdge(mesh.indices, mesh.positions.length / 3);
-    const valences = computeValences(he);
-    setColors(gl, gm, buildValenceColors(valences));
-
-    setLines(gl, gm, buildWireframeIndices(mesh.indices));
-    console.info('OBJ loaded.', { verts: mesh.positions.length / 3, tris: mesh.indices.length / 3 });
-  } catch (err) {
-    console.error(err);
-    alert('OBJ load failed (see console).');
-  }
-});
-
-// ──────────────────────────────────────────────────────────────
-// IFC ingest (Milestone 5) — sanitize + normalize + recompute normals
-// ──────────────────────────────────────────────────────────────
-const ifcInput = document.getElementById('ifcFile') as HTMLInputElement | null;
-const ifcProps = document.getElementById('ifcProps') as HTMLPreElement | null;
-let openIfcModelID: number | null = null;
-
 function placeholderQuad(): Mesh {
   const positions = new Float32Array([-1,-1,0, 1,-1,0, 1,1,0, -1,1,0]);
   const normals   = new Float32Array([ 0, 0,1, 0, 0,1, 0,0,1,  0,0,1]);
   const indices   = new Uint32Array([0,1,2, 0,2,3]);
   return { positions, normals, indices };
 }
-
-// Polygon runs (-1 separators) → triangles
-function normalizeToTriangles(idx: Int32Array | Uint32Array | Uint16Array): Uint32Array {
-  let hasNeg = false;
-  for (let i = 0; i < (idx as any).length; i++) if ((idx as any)[i] < 0) { hasNeg = true; break; }
-  if (!hasNeg && idx.length % 3 === 0) return idx instanceof Uint32Array ? idx : new Uint32Array(idx as any);
-  const out: number[] = []; let face: number[] = [];
-  const flush = () => { if (face.length >= 3) { const a0 = face[0]; for (let i=1;i+1<face.length;i++) out.push(a0, face[i], face[i+1]); } face = []; };
-  for (let i = 0; i < (idx as any).length; i++) { const v = (idx as any)[i]; if (v < 0) { flush(); continue; } face.push(v); }
-  flush(); return new Uint32Array(out);
-}
-// Drop degenerate/OOB triangles
-function sanitizeTriangles(tri: Uint32Array, vertCount: number): Uint32Array {
-  const out: number[] = [];
-  for (let i = 0; i < tri.length; i += 3) {
-    const a = tri[i], b = tri[i+1], c = tri[i+2];
-    if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
-    if (a === b || b === c || c === a) continue;
-    out.push(a, b, c);
-  }
-  return new Uint32Array(out);
-}
-// Ensure positions length multiple of 3
 function coercePositionsToTriples(P: Float32Array): Float32Array {
   const n = Math.floor(P.length / 3) * 3;
   if (n === P.length) return P;
   console.warn('Truncating positions to multiple of 3:', P.length, '->', n);
   return new Float32Array(P.buffer, P.byteOffset, n);
 }
-// Center + scale to fit camera
 function normalizePositions(positions: Float32Array): { positions: Float32Array; center:[number,number,number]; scale:number } {
   const n = positions.length / 3; if (!n) return { positions, center:[0,0,0], scale:1 };
   let minX=+Infinity,minY=+Infinity,minZ=+Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
@@ -241,7 +192,6 @@ function normalizePositions(positions: Float32Array): { positions: Float32Array;
   for (let i=0;i<positions.length;i+=3){ out[i]=(positions[i]-cx)*scale; out[i+1]=(positions[i+1]-cy)*scale; out[i+2]=(positions[i+2]-cz)*scale; }
   return { positions: out, center:[cx,cy,cz], scale };
 }
-// Recompute smooth per-vertex normals
 function recomputeNormalsCPU(positions: Float32Array, indices: Uint32Array): Float32Array {
   const N = new Float32Array(positions.length);
   for (let i=0;i<indices.length;i+=3){
@@ -257,73 +207,117 @@ function recomputeNormalsCPU(positions: Float32Array, indices: Uint32Array): Flo
   return N;
 }
 
+// ──────────────────────────────────────────────────────────────
+/** OBJ loader */
+// ──────────────────────────────────────────────────────────────
+const objInput = document.getElementById('objFile') as HTMLInputElement | null;
+objInput?.addEventListener('change', async (e: any) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  try {
+    const mesh: Mesh = await loadOBJ(file);
+    const posNorm = normalizePositions(mesh.positions);
+    const tri     = mesh.indices instanceof Uint32Array ? mesh.indices : new Uint32Array(mesh.indices);
+    const N       = recomputeNormalsCPU(posNorm.positions, tri);
+
+    gm = uploadMesh(gl, { positions: posNorm.positions, normals: N, indices: tri });
+
+    const he  = buildHalfEdge(tri, posNorm.positions.length / 3);
+    const val = computeValences(he);
+    setColors(gl, gm, buildValenceColors(val));
+    setLines(gl, gm, buildWireframeIndices(tri));
+
+    console.info('OBJ loaded.', { verts: posNorm.positions.length / 3, tris: tri.length / 3 });
+  } catch (err) {
+    console.error('OBJ load failed:', err);
+    alert('OBJ load failed (see console).');
+  }
+});
+
+// ──────────────────────────────────────────────────────────────
+/** IFC ingest (web-ifc-three geometry, core props as fallback) */
+// ──────────────────────────────────────────────────────────────
+const ifcInput = document.getElementById('ifcFile') as HTMLInputElement | null;
+const ifcProps = document.getElementById('ifcProps') as HTMLPreElement | null;
+let openIfcModelID: number | null = null;
+
 ifcInput?.addEventListener('change', async (e: any) => {
   const file = e.target.files?.[0];
   if (!file) return;
 
+  // Close previous WASM model (if any)
   if (openIfcModelID !== null) { closeIFC(openIfcModelID); openIfcModelID = null; }
 
   try {
-    const { modelID, elements } = await loadIFC(file);
-    openIfcModelID = modelID;
+    // 1) Try tessellating via web-ifc-three (geometry path)
+    let mesh: Mesh | null = null;
+    try {
+      mesh = await loadIFCviaThree(file);
+      console.info('IFC via web-ifc-three:', {
+        verts: mesh.positions.length / 3,
+        tris:  (mesh.indices as Uint32Array | Uint16Array).length / 3
+      });
+    } catch (e2) {
+      console.warn('web-ifc-three tessellation failed, falling back to core loader:', e2);
+    }
 
-    const chosen = elements.find(el => !!el.mesh);
-    const rawMesh: Mesh = chosen?.mesh ?? placeholderQuad();
+    // 2) If geometry failed, load PROPERTIES ONLY via core loader and bail (no geometry read here)
+    if (!mesh) {
 
-    const triNorm  = normalizeToTriangles(rawMesh.indices as any);
-    const posTriples = coercePositionsToTriples(rawMesh.positions);
-    const vertCount  = posTriples.length / 3;
-    const triClean   = sanitizeTriangles(triNorm, vertCount);
-
-    if (triClean.length < 3) {
+      // quick visual placeholder to prove the GL pipeline is alive:
       const ph = placeholderQuad();
       gm = uploadMesh(gl, ph);
       setLines(gl, gm, buildWireframeIndices(ph.indices));
-      if (ifcProps) {
-        const picked = chosen ?? elements[0];
+
+      const { modelID, elements } = await loadIFCcore(file);
+      openIfcModelID = modelID;
+
+      const first = elements[0];
+      if (ifcProps && first) {
         ifcProps.textContent = JSON.stringify({
-          GlobalId: picked?.globalId, Name: picked?.name, Type: picked?.type,
-          Triangles: 0, Note: 'No usable triangles; showing placeholder.'
+          GlobalId: first.globalId,
+          Name: first.name,
+          Type: first.type,
+          Triangles: 0,
+          Note: 'Core loader is props-only (no geometry).',
         }, null, 2);
+      } else if (ifcProps) {
+        ifcProps.textContent = 'Loaded IFC properties (no elements found).';
       }
-      console.info('IFC loaded (placeholder):', { elements: elements.length, cleanTris: 0, verts: ph.positions.length/3 });
-      return;
+
+      console.info('IFC core had no geometry (by design). Render path skipped.');
+      return; // ← important: don’t touch geometry here
     }
 
-    const posNorm  = normalizePositions(posTriples);
-    const normals  = recomputeNormalsCPU(posNorm.positions, triClean);
+    // 3) Normalize for camera + recompute normals (Three path)
+    const posTriples = coercePositionsToTriples(mesh.positions);
+    const posNorm    = normalizePositions(posTriples);
+    const tri        = mesh.indices instanceof Uint32Array ? mesh.indices : new Uint32Array(mesh.indices);
+    const N          = recomputeNormalsCPU(posNorm.positions, tri);
 
-    const safeMesh: Mesh = { positions: posNorm.positions, normals, indices: triClean };
+    // 4) Upload + overlays
+    gm = uploadMesh(gl, { positions: posNorm.positions, normals: N, indices: tri });
+    setLines(gl, gm, buildWireframeIndices(tri));
 
-    console.info('SAFE MESH STATS', {
-      verts: safeMesh.positions.length/3,
-      tris:  safeMesh.indices.length/3,
-      posFinite: Number.isFinite(safeMesh.positions[0]),
-      idxMax: safeMesh.indices.length ? Math.max(...Array.from(safeMesh.indices as Uint32Array)) : -1
-    });
-
-    gm = uploadMesh(gl, safeMesh);
-    setLines(gl, gm, buildWireframeIndices(safeMesh.indices));
-
-    const he  = buildHalfEdge(safeMesh.indices, safeMesh.positions.length / 3);
+    const he  = buildHalfEdge(tri, posNorm.positions.length / 3);
     const val = computeValences(he);
     setColors(gl, gm, buildValenceColors(val));
 
+    // 5) Sidebar stats
     if (ifcProps) {
-      const picked = chosen ?? elements[0];
       ifcProps.textContent = JSON.stringify({
-        GlobalId: picked?.globalId, Name: picked?.name, Type: picked?.type,
-        Triangles: triClean.length / 3
+        GlobalId: '(merged)',
+        Name: '(IFC)',
+        Type: 'Model',
+        Triangles: tri.length / 3
       }, null, 2);
     }
 
-    console.info('IFC loaded:', {
-      elements: elements.length,
-      drawn: chosen ? chosen.type : 'props-only',
-      normalizedTris: triNorm.length / 3,
-      cleanTris: triClean.length / 3,
-      verts: posNorm.positions.length / 3,
-    });
+    // 6) Log counts actually uploaded
+    if (gm) {
+      console.info('GPU mesh uploaded:', { triCount: gm.triCount, lineCount: gm.lineCount || 0 });
+    }
   } catch (err) {
     console.error('IFC load failed:', err);
     if (ifcProps) ifcProps.textContent = 'IFC load failed (see console).';
